@@ -231,9 +231,3 @@ We build upon the research and innovations from numerous papers and projects in 
 
 
 
-<div align="center">
-
-**Made with ❤️ for advancing medical AI**
-
-
-</div>
