@@ -1,8 +1,8 @@
-# Dolphin Ultrasound: A Large Language Model for Medical Ultrasound Analysis
+# A Large-Scale Ultrasound Vision–Language Foundation Model for Expert-Level Clinical Reasoning
 
 <div align="center">
 
-**A specialized large language model for medical ultrasound image analysis and reasoning**
+**A specialized multimodal large language model for medical ultrasound analysis and reasoning**
 
 </div>
 
