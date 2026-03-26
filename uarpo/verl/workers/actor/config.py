@@ -91,6 +91,7 @@ class ActorConfig:
     offload: OffloadConfig = field(default_factory=OffloadConfig)
     """auto keys"""
     global_batch_size_per_device: int = field(default=-1, init=False)
+    adv_estimator: str = field(default="uarpo", init=False)
     disable_kl: bool = field(default=False, init=False)
     use_kl_loss: bool = field(default=False, init=False)
     kl_penalty: str = field(default="kl", init=False)

@@ -58,8 +58,7 @@ class AdaptiveKLController(KLController):
 
 
 class FixedKLController(KLController):
-    """Fixed KL controller.
-
+    """Fixed KL coefficient (no automatic adjustment)."""
 
     def __init__(self, init_kl_coef: float):
         self.kl_coef = init_kl_coef
@@ -92,6 +91,7 @@ def compute_gae_advantage_return(
     gamma: torch.Tensor,
     lam: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
 
     Args:
         token_level_rewards: `(torch.Tensor)`
@@ -126,46 +126,53 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
-# NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
+# NOTE(sgm): outcome supervision — one scalar reward per response (typically on last token).
 @torch.no_grad()
 def compute_uarpo_outcome_advantage(
     token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, eps: float = 1e-6
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute advantage for UARPO, operating only on Outcome reward
-    (with only one scalar reward for each response).
+    Group-normalized advantage for UARPO (Ultrasound Answer Relative Policy Optimization):
+
+        A_i = (R(x,y_i) - μ_R) / (σ_R + ε),
+
+    where μ_R, σ_R are the mean and standard deviation of rewards within the K sampled
+    responses that share the same prompt (group), identified by ``index`` (uid).
+
+    The normalized scalar is broadcast to all response tokens for policy gradient.
 
     Args:
-        token_level_rewards: `(torch.Tensor)`
-            shape: (bs, response_length)
-        response_mask: `(torch.Tensor)`
-            shape: (bs, response_length)
+        token_level_rewards: shape (bs, response_length)
+        response_mask: shape (bs, response_length)
+        index: shape (bs,) — group id per row (same id = same prompt x)
 
     Returns:
-        advantages: `(torch.Tensor)`
-            shape: (bs, response_length)
-        returns: `(torch.Tensor)`
-            shape: (bs, response_length)
-
+        advantages, returns — both shape (bs, response_length), broadcast A_i on valid tokens
     """
     scores = token_level_rewards.sum(dim=-1)
-    id2score = defaultdict(list)
-    id2mean, id2std = {}, {}
-
+    device, dtype = scores.device, scores.dtype
     bsz = scores.shape[0]
+
+    uid_to_gid: dict = {}
+    gids = torch.empty(bsz, dtype=torch.long, device=device)
     for i in range(bsz):
-        id2score[index[i]].append(scores[i])
+        u = index[i]
+        if u not in uid_to_gid:
+            uid_to_gid[u] = len(uid_to_gid)
+        gids[i] = uid_to_gid[u]
 
-    for idx in id2score:
-        assert len(id2score[idx]) > 1, "UARPO needs rollout.n > 1."
-        id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-        id2std[idx] = torch.std(torch.tensor(id2score[idx]))
+    num_groups = len(uid_to_gid)
+    norm_scores = torch.empty_like(scores)
+    for g in range(num_groups):
+        mask_g = gids == g
+        gs = scores[mask_g]
+        assert gs.numel() > 1, "UARPO requires rollout.n > 1 (multiple candidates per prompt)."
+        mu = gs.mean()
+        sig = gs.std(unbiased=False)
+        norm_scores[mask_g] = (gs - mu) / (sig + eps)
 
-    for i in range(bsz):
-        scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + eps)
-
-    returns = scores.unsqueeze(-1) * response_mask
-    return returns, returns
+    advantages = norm_scores.unsqueeze(-1) * response_mask
+    return advantages, advantages
 
 
 @torch.no_grad()
@@ -336,6 +343,35 @@ def compute_policy_loss(
     pg_clipfrac_lower = VF.masked_mean(pg_clipfrac_lower, response_mask)
     ppo_kl = VF.masked_mean(-negative_approx_kl, response_mask)
     return final_pg_loss, pg_clipfrac_higher, pg_clipfrac_lower, ppo_kl
+
+
+def compute_uarpo_policy_loss(
+    log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """UARPO policy objective (no PPO clipping):
+
+    .. math::
+
+        \\mathcal{L}_{\\mathrm{UARPO}}
+        = -\\mathbb{E}_{x,\\{y_i\\}}\\left[\\frac{1}{K}\\sum_{i=1}^K A_i \\log \\pi_\\theta(y_i|x)\\right].
+
+    With autoregressive factorization,
+    :math:`\\log\\pi_\\theta(y|x)=\\sum_t \\log\\pi_\\theta(y_t|x,y_{<t})`, and scalar :math:`A_i`
+    broadcast to response tokens,
+    :math:`\\sum_t A_i \\log\\pi_t = A_i \\log\\pi_\\theta(y_i|x)`.
+
+    The batch mean approximates the expectation over prompts.
+    """
+    # Per-sequence log-prob and advantage (A_i is constant on valid response tokens).
+    seq_log_prob = (log_probs * response_mask).sum(dim=-1)
+    denom = response_mask.sum(dim=-1).clamp(min=1.0)
+    adv_seq = (advantages * response_mask).sum(dim=-1) / denom
+    pg_loss = -(seq_log_prob * adv_seq).mean()
+
+    zero = log_probs.new_tensor(0.0)
+    return pg_loss, zero, zero, zero
 
 
 def compute_value_loss(

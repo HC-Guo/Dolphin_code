@@ -246,15 +246,22 @@ class DataParallelPPOActor(BasePPOActor):
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
                     entropy_loss = -VF.masked_mean(log_probs, response_mask)  # estimator of entropy loss
 
-                    pg_loss, pg_clipfrac_higher, pg_clipfrac_lower, ppo_kl = core_algos.compute_policy_loss(
-                        old_log_probs=old_log_probs,
-                        log_probs=log_probs,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        clip_ratio_low=self.config.clip_ratio_low,
-                        clip_ratio_high=self.config.clip_ratio_high,
-                        clip_ratio_dual=self.config.clip_ratio_dual,
-                    )
+                    if self.config.adv_estimator == "uarpo":
+                        pg_loss, pg_clipfrac_higher, pg_clipfrac_lower, ppo_kl = core_algos.compute_uarpo_policy_loss(
+                            log_probs=log_probs,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                        )
+                    else:
+                        pg_loss, pg_clipfrac_higher, pg_clipfrac_lower, ppo_kl = core_algos.compute_policy_loss(
+                            old_log_probs=old_log_probs,
+                            log_probs=log_probs,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            clip_ratio_low=self.config.clip_ratio_low,
+                            clip_ratio_high=self.config.clip_ratio_high,
+                            clip_ratio_dual=self.config.clip_ratio_dual,
+                        )
                     if "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
                         # compute kl loss
